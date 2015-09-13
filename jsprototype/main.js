@@ -6,8 +6,18 @@ var game;
 
 var color = ["#111111", "#333333", "#ff0000", "#00ff00", "#0000ff", "#ffff00", "#00ffff", "#ff00ff", "#77777777", "#ffffff"]
 
-var sprites = [];
+var gridRes = 8;
+var MINSIZE = 3;
+var MAXSIZE = 8;
 
+var rects = [];
+var edges = [];
+
+var score = [];
+var scoreText = [];
+var statusText;
+
+var activePlayer = 0;
 
 function intersects(ra, rb) {
     
@@ -15,6 +25,44 @@ function intersects(ra, rb) {
              (rb.x + rb.w) <= ra.x || 
              (rb.y       ) >= (ra.y+ra.h) ||
              (rb.y+rb.h  ) <= (ra.y));
+}
+
+function between(alo, ahi, blo, bhi) {
+    return ((alo <= bhi) && (alo >= blo)) || ((ahi <= bhi) && (ahi >= blo)) || ((blo <= ahi) && (blo >= alo));
+}
+
+// return n, s, e, w, or no depending on which side we share a border, no for none
+function shareEdge(a, b) {
+    console.log(a.x +" "+ a.w+" " + " " + b.x + " " + b.w);
+    if ((a.x == (b.x+b.w)) && (between(b.y, b.y+b.h, a.y, a.y+a.h))) {
+	return 'edge';
+    }
+    if (((a.x+a.w) == b.x) && (between(b.y, b.y+b.h, a.y, a.y+a.h))) {
+	return 'edge';
+    }
+    if ((a.y == (b.y+b.h)) && (between(b.x, b.x+b.w, a.x, a.x+a.w))) {
+	return 'edge';
+    }
+    if (((a.y+a.h) == b.y) && (between(b.x, b.x+b.w, a.x, a.x+a.w))) {
+	return 'edge';
+    }
+    return 'none';
+}
+
+// find all rectangles that share an edge
+// does the full loop adding an edge from each side
+// (could do half the comparissons among other thingsif speed mattered)
+function buildGraph(list) {
+    for (var i = 0; i < list.length; ++i) {
+	list[i].edge = [];
+	for (var j = 0; j < list.length; ++j) {
+	    if (i == j) continue;
+	    var share = shareEdge(list[i], list[j]); 
+	    if (share != 'none') {
+		list[i].edge.push(list[j]);
+	    }
+	}	
+    }
 }
 
 function bresenham(x1, y1, x2, y2) {
@@ -46,18 +94,125 @@ function bresenham(x1, y1, x2, y2) {
     return coordinatesArray;
 }
 
-function generateMap() {
-    var rects = [];
+// remove the neighbours edges to this rect
+function removeEdges(rect) {
+    for(var i = 0; i < rect.edge.length; ++i) {
+	var idx = rect.edge[i].edge.indexOf(rect);
+	rect.edge[i].edge.splice(idx, 1);
+    }
+}
 
-    var gridRes = 8;
-    var MINSIZE = 3;
-    var MAXSIZE = 8;
+function expandGraph(a) {
+    var graph = [];
+    var toVisit = [a];
+
+    console.log("lets investigate " + a.x + " " + a.y);
     
-    var sampler = new PoissonDiskSampler( 1024, 1024, 80, 20 );
+    while (toVisit.length > 0) {
+	for (var i = 0; i < toVisit[0].edge.length; ++i) {
+	    // for each neighbour add it to toVisit unless we already have it
+	    if ((graph.indexOf(toVisit[0].edge[i]) == -1) &&
+		(toVisit.indexOf(toVisit[0].edge[i]) == -1)) {
+		toVisit.push(toVisit[0].edge[i]);
+	    }
+	}
+
+	// add this one to the graph
+	graph.push(toVisit[0]);
+	// remove the one we were working on
+	toVisit.splice(0,1);
+    }
+
+    console.log("this graph had " + graph.length + " nodes");
+    
+    return graph
+}
+
+function touch(sprite, pointer) {
+    sprite.kill();
+
+    console.log("size " +  rects[sprite.rectid].w + " " + rects[sprite.rectid].h);
+    var rect = rects[sprite.rectid];
+    // this rect will be removed, first remove all the edges associated with his and its neigbours
+    removeEdges(rect);
+
+    console.log(rect.edge.length);
+
+    // now we may have gotten a set of separate islands in out graph, lets find out
+    // build the graph for each island (most will likely be the same but this
+    // is sufficiently fast)
+    var islandCandidates = rect.edge.map(expandGraph);
+
+    var islands = [islandCandidates[0]];
+
+    // any element in one of the islands will not be available in any other island that is connected,
+    // lets check if element 0 in each island is available in a neighbour
+    for (var i = 1; i < islandCandidates.length; ++i) {
+	var found = false;
+	for (var j = 0; j < islands.length; ++j) {
+	    if (islands[j].indexOf(islandCandidates[i][0]) != -1) {
+		found = true;
+		break;
+	    }
+	}
+	if (!found) {
+	    islands.push(islandCandidates[i]);
+	}
+    }
+
+    // Now, every island but the largest should be removed. First calculate the areas of the islands
+    islandAreas = islands.map(function(list) {
+	var area = 0;
+	for (var j = 0; j < list.length; ++j) {
+	    area += list[j].w*list[j].h/gridRes/gridRes;
+	}
+	return area;
+    })
+    var totArea = islandAreas.reduce(function(pv, cv) { return pv + cv; }, 0);
+    var maxArea = islandAreas.reduce(function(pv, cv) { return pv > cv ? pv : cv; }, 0);
+    var maxIdx = islandAreas.indexOf(maxArea);
+
+    // for each island elimate if it is not the max area
+    // give penalty if the removed area was more than 25%
+    for (var i = 0; i < islandAreas.length; ++i) {
+	if (i == maxIdx) continue; // make sure we don't leave multiple equally sized areas
+
+	if (maxArea >= totArea*0.75) {
+	    score[activePlayer] += islandAreas[i];
+	} else {
+	    score[activePlayer] -= islandAreas[i]/2;
+	}
+	for (var j = 0; j < islands[i].length; ++j) {
+//	    var tween = game.add.tween(islands[i][j].sprite).to( { alpha: 0 }, 500, Phaser.Easing.Linear.None, true, 0, 1, true);
+	    
+	    islands[i][j].sprite.inputEnabled = false;
+	    islands[i][j].sprite.kill();
+	    
+	}
+    }
+
+    statusText.text = "" + Math.round(maxArea/totArea* 100) + "%";
+    
+    // penalty for the size of the one we touched
+    score[activePlayer] -= rects[sprite.rectid].w * rects[sprite.rectid].h/gridRes/gridRes;
+
+    updateScore(activePlayer);
+    
+    activePlayer = 1 - activePlayer;
+}
+
+function generateMap() {
+
+    
+    var sampler = new PoissonDiskSampler( 2048, 2048, 80, 20 );
 
     // add the first point center
     sampler.queueToAll( { x: game.world.centerX, y: game.world.centerY });
     
+    sampler.sample();
+    sampler.sample();
+    sampler.sample();
+    sampler.sample();
     sampler.sample();
     sampler.sample();
     sampler.sample();
@@ -109,8 +264,6 @@ function generateMap() {
 	var hitX = false;
 	var hitY = false;
 
-	console.log("i: " + i);
-
 	path = bresenham(rects[i].x/gridRes, rects[i].y/gridRes, game.world.centerX/gridRes, game.world.centerY/gridRes)
 
 	var finalP = 0;
@@ -119,7 +272,7 @@ function generateMap() {
 
 	for (var p = 1; p <  path.length; ++p) {
 
-	    console.log ("check: " + path[p].x*gridRes + " " + path[p].y*gridRes + " " + rects[i].w + " " + rects[i].h)
+//	    console.log ("check: " + path[p].x*gridRes + " " + path[p].y*gridRes + " " + rects[i].w + " " + rects[i].h)
 
 	    // test against all other rects
 	    for (var j = 0; j < i; ++j) {
@@ -137,16 +290,19 @@ function generateMap() {
 	rects[i].y = path[finalP].y*gridRes;
     }
 
-
+    // generate a graph based on the rects
+    buildGraph(rects);
     
     // Generate the actual sprites
     for (var i = 0; i < rects.length; i++) {
 	var scaleX = (rects[i].w)/256;
 	var scaleY = (rects[i].h)/256;
-	console.log("p " + rects[i].x + " " + rects[i].y);
 	var sprite = game.add.sprite(rects[i].x, rects[i].y, 'sq');
-	console.log("scaleX " + scaleX);
 	sprite.scale.set(scaleX,scaleY);
+	sprite.inputEnabled = true;
+	sprite.rectid = i;
+	sprite.events.onInputDown.add(touch, i);
+	rects[i].sprite = sprite;
     }
 
 /*
@@ -171,12 +327,24 @@ function preload() {
 function create() {
     game.physics.startSystem(Phaser.Physics.P2JS);
     generateMap();
-}
-    
-function render () {
-    // this is proibably not very fast
 
-    // move them apart
+    var style = { font: "bold 32px Arial", fill: "#fff", boundsAlignH: "left", boundsAlignV: "up" };
+    var styleC = { font: "bold 32px Arial", fill: "#fff", boundsAlignH: "center", boundsAlignV: "up" };
+    scoreText.push(game.add.text(0, 0, "Player 1: 0", style));
+    scoreText.push(game.add.text(512, 0, "Player 2: 0", style));
+    statusText = game.add.text(0, 100, "WWWWWWWWW", styleC);
+    statusText.setTextBounds(0, 0, 1024, 1024)
+
+    
+    score.push(0);
+    score.push(0);
+}
+
+function updateScore(id) {
+    scoreText[id].text = "Player " + (id+1) +": " + score[id];
+}
+
+function render () {
 }
 
 function start() {
